@@ -4,7 +4,7 @@ set -u
 umask 022
 export LC_ALL=C
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 DEFAULT_SCRIPT_UPDATE_URL="${XRAY_SCRIPT_URL:-https://raw.githubusercontent.com/SpeedupMaster/Xray-Script/main/xray-manager.sh}"
 
 INSTALL_DIR="/usr/local/xray"
@@ -465,20 +465,97 @@ prompt_sni_domain() {
   done
 }
 
-generate_x25519_keys() {
-  local output private_key public_key
-  output="$("$XRAY_BIN" x25519 2>/dev/null)"
-  private_key="$(printf '%s\n' "$output" | awk -F': ' '/Private key/ {print $2}' | tail -n1)"
-  public_key="$(printf '%s\n' "$output" | awk -F': ' '/Public key/ {print $2}' | tail -n1)"
+is_valid_x25519_key() {
+  [[ "$1" =~ ^[A-Za-z0-9_-]{43}$ ]]
+}
 
-  if [ -z "$private_key" ] || [ -z "$public_key" ]; then
-    log_error "Failed to generate REALITY keys."
+base64url_encode_file() {
+  openssl base64 -A <"$1" | tr '+/' '-_' | tr -d '=\r\n'
+}
+
+generate_x25519_keys_with_xray() {
+  local output status private_key public_key
+
+  output="$("$XRAY_BIN" x25519 2>&1)"
+  status=$?
+  private_key="$(printf '%s\n' "$output" | awk -F':[[:space:]]*' 'tolower($1) ~ /private key/ {print $2; exit}' | tr -d '\r\n')"
+  public_key="$(printf '%s\n' "$output" | awk -F':[[:space:]]*' 'tolower($1) ~ /public key/ {print $2; exit}' | tr -d '\r\n')"
+
+  if [ "$status" -ne 0 ]; then
+    XRAY_X25519_ERROR_OUTPUT="$output"
+    return 1
+  fi
+
+  if ! is_valid_x25519_key "$private_key" || ! is_valid_x25519_key "$public_key"; then
+    XRAY_X25519_ERROR_OUTPUT="$output"
     return 1
   fi
 
   REALITY_PRIVATE_KEY="$private_key"
   REALITY_PUBLIC_KEY="$public_key"
   return 0
+}
+
+generate_x25519_keys_with_openssl() {
+  local tmp_dir private_pem private_raw public_raw private_key public_key
+
+  tmp_dir="$(mktemp -d)" || return 1
+  private_pem="${tmp_dir}/x25519.pem"
+  private_raw="${tmp_dir}/x25519.private.raw"
+  public_raw="${tmp_dir}/x25519.public.raw"
+
+  if ! openssl genpkey -algorithm X25519 -out "$private_pem" >/dev/null 2>&1; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  if ! openssl pkey -in "$private_pem" -outform DER 2>/dev/null | tail -c 32 >"$private_raw"; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  if ! openssl pkey -in "$private_pem" -pubout -outform DER 2>/dev/null | tail -c 32 >"$public_raw"; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  if [ "$(wc -c <"$private_raw" | tr -d '[:space:]')" != "32" ] || [ "$(wc -c <"$public_raw" | tr -d '[:space:]')" != "32" ]; then
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  private_key="$(base64url_encode_file "$private_raw")"
+  public_key="$(base64url_encode_file "$public_raw")"
+  rm -rf "$tmp_dir"
+
+  if ! is_valid_x25519_key "$private_key" || ! is_valid_x25519_key "$public_key"; then
+    return 1
+  fi
+
+  REALITY_PRIVATE_KEY="$private_key"
+  REALITY_PUBLIC_KEY="$public_key"
+  return 0
+}
+
+generate_x25519_keys() {
+  XRAY_X25519_ERROR_OUTPUT=""
+
+  if generate_x25519_keys_with_xray; then
+    return 0
+  fi
+
+  if [ -n "${XRAY_X25519_ERROR_OUTPUT:-}" ]; then
+    log_warn "xray x25519 failed, falling back to OpenSSL. Raw output: ${XRAY_X25519_ERROR_OUTPUT}"
+  else
+    log_warn "xray x25519 failed, falling back to OpenSSL."
+  fi
+
+  if generate_x25519_keys_with_openssl; then
+    return 0
+  fi
+
+  log_error "Failed to generate REALITY keys."
+  return 1
 }
 
 generate_uuid() {
