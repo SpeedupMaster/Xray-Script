@@ -4,7 +4,7 @@ set -u
 umask 022
 export LC_ALL=C
 
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 DEFAULT_SCRIPT_UPDATE_URL="${XRAY_SCRIPT_URL:-https://raw.githubusercontent.com/SpeedupMaster/Xray-Script/main/xray-manager.sh}"
 
 INSTALL_DIR="/usr/local/xray"
@@ -576,6 +576,25 @@ generate_ss_password() {
   SS_PASSWORD="$(openssl rand -base64 32 | tr -d '\r\n')"
 }
 
+urlencode_userinfo() {
+  local input="$1"
+  local i char encoded=""
+
+  for ((i=0; i<${#input}; i++)); do
+    char="${input:i:1}"
+    case "$char" in
+      [a-zA-Z0-9.~_-])
+        encoded+="$char"
+        ;;
+      *)
+        printf -v encoded '%s%%%02X' "$encoded" "'$char"
+        ;;
+    esac
+  done
+
+  printf '%s\n' "$encoded"
+}
+
 build_vless_inbound() {
   cat <<EOF
 {
@@ -844,7 +863,13 @@ build_vless_link() {
 build_ss_link() {
   local host="$1"
   local userinfo
-  userinfo="$(printf '%s' "${SS_METHOD}:${SS_PASSWORD}" | base64 | tr -d '\r\n')"
+
+  if [[ "$SS_METHOD" == 2022-* ]]; then
+    userinfo="$(urlencode_userinfo "${SS_METHOD}:${SS_PASSWORD}")"
+  else
+    userinfo="$(printf '%s' "${SS_METHOD}:${SS_PASSWORD}" | base64 | tr -d '\r\n' | tr '+/' '-_' | tr -d '=')"
+  fi
+
   printf 'ss://%s@%s:%s#XRAY-SS-2022\n' "$userinfo" "$host" "$SS_PORT"
 }
 
