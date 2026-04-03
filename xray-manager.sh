@@ -5,7 +5,7 @@ umask 022
 export LC_ALL=C
 
 SCRIPT_VERSION="1.0.0"
-DEFAULT_SCRIPT_UPDATE_URL="${XRAY_SCRIPT_URL:-}"
+DEFAULT_SCRIPT_UPDATE_URL="${XRAY_SCRIPT_URL:-https://raw.githubusercontent.com/SpeedupMaster/Xray-Script/main/xray-manager.sh}"
 
 INSTALL_DIR="/usr/local/xray"
 XRAY_BIN="${INSTALL_DIR}/xray"
@@ -69,6 +69,22 @@ log_warn() {
 
 log_error() {
   printf '[ERROR] %s\n' "$*" >&2
+}
+
+tty_printf() {
+  if [ -e /dev/tty ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    printf "$@" >/dev/tty
+  else
+    printf "$@" >&2
+  fi
+}
+
+read_tty_line() {
+  if [ -e /dev/tty ] && [ -r /dev/tty ]; then
+    IFS= read -r REPLY </dev/tty
+  else
+    IFS= read -r REPLY
+  fi
 }
 
 pause_screen() {
@@ -363,12 +379,12 @@ port_is_listening() {
 prompt_port() {
   local prompt_text="$1"
   local default_port="$2"
-  local entered_port
+  local entered_port reuse_answer
 
   while true; do
-    printf '%s [%s]: ' "$prompt_text" "$default_port"
-    read -r entered_port
-    entered_port="${entered_port:-$default_port}"
+    tty_printf '%s [%s]: ' "$prompt_text" "$default_port"
+    read_tty_line
+    entered_port="${REPLY:-$default_port}"
 
     if ! port_is_valid "$entered_port"; then
       log_warn "Please enter a valid port between 1 and 65535."
@@ -377,8 +393,9 @@ prompt_port() {
 
     if port_is_listening "$entered_port"; then
       log_warn "Port ${entered_port} is already in use. Reusing it may fail if another service owns it."
-      printf 'Continue with port %s? [y/N]: ' "$entered_port"
-      read -r reuse_answer
+      tty_printf 'Continue with port %s? [y/N]: ' "$entered_port"
+      read_tty_line
+      reuse_answer="${REPLY:-}"
       case "${reuse_answer:-n}" in
         y|Y|yes|YES)
           printf '%s\n' "$entered_port"
@@ -414,13 +431,13 @@ validate_domain_resolution() {
 }
 
 prompt_sni_domain() {
-  local suggested entered_domain
+  local suggested entered_domain resolve_answer
   suggested="$(get_random_sni)"
 
   while true; do
-    printf 'Reality SNI domain (press Enter for random: %s): ' "$suggested"
-    read -r entered_domain
-    entered_domain="${entered_domain:-$suggested}"
+    tty_printf 'Reality SNI domain (press Enter for random: %s): ' "$suggested"
+    read_tty_line
+    entered_domain="${REPLY:-$suggested}"
 
     if ! validate_domain_format "$entered_domain"; then
       log_warn "Invalid domain format."
@@ -428,8 +445,9 @@ prompt_sni_domain() {
     fi
 
     if ! validate_domain_resolution "$entered_domain"; then
-      log_warn "The domain does not appear to resolve on this server. Continue anyway? [y/N]"
-      read -r resolve_answer
+      tty_printf 'The domain does not appear to resolve on this server. Continue anyway? [y/N]: '
+      read_tty_line
+      resolve_answer="${REPLY:-}"
       case "${resolve_answer:-n}" in
         y|Y|yes|YES)
           printf '%s\n' "$entered_domain"
