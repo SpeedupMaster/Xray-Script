@@ -4,7 +4,7 @@ set -u
 umask 022
 export LC_ALL=C
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.1.1"
 DEFAULT_SCRIPT_UPDATE_URL="${XRAY_SCRIPT_URL:-https://raw.githubusercontent.com/SpeedupMaster/Xray-Script/main/xray-manager.sh}"
 
 INSTALL_DIR="/usr/local/xray"
@@ -70,6 +70,45 @@ log_warn() {
 
 log_error() {
   printf '[ERROR] %s\n' "$*" >&2
+}
+
+UI_DIVIDER="========================================"
+
+print_divider() {
+  printf '%s\n' "$UI_DIVIDER"
+}
+
+print_header() {
+  print_divider
+  printf ' %s\n' "$1"
+  print_divider
+}
+
+print_menu_item() {
+  printf ' %s) %s\n' "$1" "$2"
+}
+
+translate_service_state() {
+  case "$1" in
+    active)
+      printf '运行中\n'
+      ;;
+    inactive)
+      printf '未运行\n'
+      ;;
+    failed)
+      printf '失败\n'
+      ;;
+    activating)
+      printf '启动中\n'
+      ;;
+    deactivating)
+      printf '停止中\n'
+      ;;
+    *)
+      printf '%s\n' "$1"
+      ;;
+  esac
 }
 
 tty_printf() {
@@ -899,7 +938,7 @@ build_ss_link() {
 }
 
 generate_node_info() {
-  local host service_state xray_version
+  local host service_state service_state_text xray_version vless_link ss_link
 
   if ! load_state; then
     log_error "未找到安装状态文件。"
@@ -909,43 +948,50 @@ generate_node_info() {
   host="$(get_public_ip || true)"
   host="${host:-${SERVER_IP:-<your_server_ip>}}"
   service_state="$(systemctl is-active xray 2>/dev/null || printf 'inactive')"
+  service_state_text="$(translate_service_state "$service_state")"
   xray_version="$(current_xray_version || true)"
   xray_version="${xray_version:-unknown}"
 
   {
-    echo "Xray 管理脚本"
-    echo "脚本版本：${SCRIPT_VERSION}"
-    echo "Xray 版本：${xray_version}"
-    echo "服务状态：${service_state}"
-    echo "服务器 IP：${host}"
-    echo
+    print_header "Xray 节点信息"
+    printf ' 脚本版本: %s\n' "$SCRIPT_VERSION"
+    printf ' Xray 版本: %s\n' "$xray_version"
+    printf ' 服务状态: %s\n' "$service_state_text"
+    printf ' 服务器 IP: %s\n' "$host"
 
     if [ "${INSTALL_VLESS:-no}" = "yes" ]; then
-      echo "[VLESS + REALITY]"
-      echo "地址：${host}"
-      echo "端口：${REALITY_PORT}"
-      echo "UUID: ${REALITY_UUID}"
-      echo "Flow：xtls-rprx-vision"
-      echo "安全类型：reality"
-      echo "SNI: ${REALITY_SNI}"
-      echo "公钥：${REALITY_PUBLIC_KEY}"
-      echo "Short ID：${REALITY_SHORT_ID}"
-      echo "指纹：chrome"
-      echo "分享链接："
-      build_vless_link "$host"
+      vless_link="$(build_vless_link "$host")"
       echo
+      print_divider
+      printf ' [VLESS + REALITY]\n'
+      print_divider
+      printf ' 地址: %s\n' "$host"
+      printf ' 端口: %s\n' "$REALITY_PORT"
+      printf ' UUID: %s\n' "$REALITY_UUID"
+      printf ' Flow: xtls-rprx-vision\n'
+      printf ' 安全类型: reality\n'
+      printf ' SNI: %s\n' "$REALITY_SNI"
+      printf ' 公钥: %s\n' "$REALITY_PUBLIC_KEY"
+      printf ' Short ID: %s\n' "$REALITY_SHORT_ID"
+      printf ' 指纹: chrome\n'
+      printf '\n 分享链接:\n%s\n' "$vless_link"
     fi
 
     if [ "${INSTALL_SS:-no}" = "yes" ]; then
-      echo "[Shadowsocks]"
-      echo "地址：${host}"
-      echo "端口：${SS_PORT}"
-      echo "加密方式：${SS_METHOD}"
-      echo "密码：${SS_PASSWORD}"
-      echo "分享链接："
-      build_ss_link "$host"
+      ss_link="$(build_ss_link "$host")"
       echo
+      print_divider
+      printf ' [Shadowsocks]\n'
+      print_divider
+      printf ' 地址: %s\n' "$host"
+      printf ' 端口: %s\n' "$SS_PORT"
+      printf ' 加密方式: %s\n' "$SS_METHOD"
+      printf ' 密码: %s\n' "$SS_PASSWORD"
+      printf '\n 分享链接:\n%s\n' "$ss_link"
     fi
+
+    echo
+    print_divider
   } | tee "$NODE_INFO_FILE"
 
   return 0
@@ -1306,42 +1352,37 @@ show_info_flow() {
 }
 
 print_help() {
-  cat <<EOF
-用法：
-  $(basename "$0")                打开交互式菜单
-  $(basename "$0") install        安装 Xray 与代理协议
-  $(basename "$0") reinstall      重新安装 Xray 与代理协议
-  $(basename "$0") uninstall      卸载 Xray 与脚本生成的文件
-  $(basename "$0") update         更新 Xray 内核
-  $(basename "$0") restart        重启 Xray 服务
-  $(basename "$0") info           查看节点信息
-  $(basename "$0") change-sni     更换 Reality SNI 域名
-  $(basename "$0") check-bbr      检查 BBR + FQ 状态
-  $(basename "$0") update-script  更新管理脚本
-  $(basename "$0") help           显示帮助信息
-EOF
+  print_header "使用说明"
+  printf ' %s\n' "$(basename "$0")                打开交互式菜单"
+  printf ' %s\n' "$(basename "$0") install        安装 Xray 与代理协议"
+  printf ' %s\n' "$(basename "$0") reinstall      重新安装 Xray 与代理协议"
+  printf ' %s\n' "$(basename "$0") uninstall      卸载 Xray 与脚本生成的文件"
+  printf ' %s\n' "$(basename "$0") update         更新 Xray 内核"
+  printf ' %s\n' "$(basename "$0") restart        重启 Xray 服务"
+  printf ' %s\n' "$(basename "$0") info           查看节点信息"
+  printf ' %s\n' "$(basename "$0") change-sni     更换 Reality SNI 域名"
+  printf ' %s\n' "$(basename "$0") check-bbr      检查 BBR + FQ 状态"
+  printf ' %s\n' "$(basename "$0") update-script  更新管理脚本"
+  printf ' %s\n' "$(basename "$0") help           显示帮助信息"
+  print_divider
 }
 
 main_menu() {
   while true; do
     clear 2>/dev/null || true
-    cat <<EOF
-========================================
- Xray 管理脚本 ${SCRIPT_VERSION}
-========================================
- 1) 安装
- 2) 重新安装
- 3) 卸载
- 4) 更新 Xray 内核
- 5) 重启 Xray
- 6) 查看节点信息
- 7) 更换 Reality SNI
- 8) 检查 BBR + FQ 状态
- 9) 更新脚本
- 0) 退出
-========================================
-EOF
-    printf '请选择功能：'
+    print_header "Xray 管理脚本 ${SCRIPT_VERSION}"
+    print_menu_item 1 "安装"
+    print_menu_item 2 "重新安装"
+    print_menu_item 3 "卸载"
+    print_menu_item 4 "更新 Xray 内核"
+    print_menu_item 5 "重启 Xray"
+    print_menu_item 6 "查看节点信息"
+    print_menu_item 7 "更换 Reality SNI"
+    print_menu_item 8 "检查 BBR + FQ 状态"
+    print_menu_item 9 "更新脚本"
+    print_menu_item 0 "退出"
+    print_divider
+    printf '\n请选择功能：'
 
     local choice
     read -r choice
