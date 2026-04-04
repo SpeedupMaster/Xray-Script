@@ -4,7 +4,7 @@ set -u
 umask 022
 export LC_ALL=C
 
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.1.0"
 DEFAULT_SCRIPT_UPDATE_URL="${XRAY_SCRIPT_URL:-https://raw.githubusercontent.com/SpeedupMaster/Xray-Script/main/xray-manager.sh}"
 
 INSTALL_DIR="/usr/local/xray"
@@ -16,6 +16,7 @@ STATE_DIR="/etc/xray-manager"
 STATE_FILE="${STATE_DIR}/agent.conf"
 NODE_INFO_FILE="${STATE_DIR}/node-info.txt"
 SCRIPT_INSTALL_PATH="/usr/local/bin/xray"
+SCRIPT_USR_PATH="/usr/bin/xray"
 SCRIPT_BACKUP_PATH="${STATE_DIR}/xray-manager.sh"
 SERVICE_FILE="/etc/systemd/system/xray.service"
 BBR_SYSCTL_FILE="/etc/sysctl.d/99-xray-bbr-fq.conf"
@@ -88,13 +89,13 @@ read_tty_line() {
 }
 
 pause_screen() {
-  printf '\nPress Enter to continue...'
+  printf '\n按 Enter 键继续...'
   read -r _
 }
 
 require_root() {
   if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-    log_error "Please run this script as root."
+    log_error "请使用 root 权限运行此脚本。"
     exit 1
   fi
 }
@@ -105,7 +106,7 @@ command_exists() {
 
 ensure_systemd() {
   if ! command_exists systemctl; then
-    log_error "systemd is required."
+    log_error "当前系统缺少 systemd，无法继续。"
     exit 1
   fi
 }
@@ -122,7 +123,7 @@ detect_package_manager() {
   elif command_exists pacman; then
     PKG_MANAGER="pacman"
   else
-    log_error "Unsupported package manager."
+    log_error "暂不支持当前系统的包管理器。"
     exit 1
   fi
 }
@@ -202,7 +203,7 @@ detect_arch() {
       XRAY_ARCH="s390x"
       ;;
     *)
-      log_error "Unsupported architecture: $(uname -m)"
+      log_error "暂不支持当前系统架构：$(uname -m)"
       exit 1
       ;;
   esac
@@ -250,22 +251,22 @@ download_and_install_xray() {
   zip_file="${tmp_dir}/xray.zip"
   download_url="https://github.com/XTLS/Xray-core/releases/download/${version}/Xray-linux-${XRAY_ARCH}.zip"
 
-  log_info "Downloading Xray ${version} for ${XRAY_ARCH}..."
+  log_info "正在下载 Xray ${version}，架构：${XRAY_ARCH} ..."
   if ! curl -fL --retry 3 --connect-timeout 15 -o "$zip_file" "$download_url"; then
     rm -rf "$tmp_dir"
-    log_error "Failed to download Xray package."
+    log_error "Xray 安装包下载失败。"
     return 1
   fi
 
   if ! unzip -oq "$zip_file" -d "$tmp_dir"; then
     rm -rf "$tmp_dir"
-    log_error "Failed to extract Xray package."
+    log_error "Xray 安装包解压失败。"
     return 1
   fi
 
   if [ ! -f "${tmp_dir}/xray" ]; then
     rm -rf "$tmp_dir"
-    log_error "Xray binary was not found in the package."
+    log_error "安装包内未找到 Xray 可执行文件。"
     return 1
   fi
 
@@ -289,9 +290,13 @@ copy_running_script_to() {
   source_file="${BASH_SOURCE[0]}"
   tmp_file="$(mktemp)"
 
-  if ! cat "$source_file" >"$tmp_file"; then
+  if [ -r "$source_file" ] && cat "$source_file" >"$tmp_file"; then
+    :
+  elif [ -n "${DEFAULT_SCRIPT_UPDATE_URL:-}" ] && curl -fsSL --connect-timeout 15 -o "$tmp_file" "$DEFAULT_SCRIPT_UPDATE_URL"; then
+    log_warn "当前脚本源文件不可直接读取，已改为从默认更新地址写入管理脚本。"
+  else
     rm -f "$tmp_file"
-    log_warn "Unable to copy the running script to ${destination}."
+    log_warn "无法写入管理脚本到 ${destination}。"
     return 1
   fi
 
@@ -299,11 +304,31 @@ copy_running_script_to() {
   rm -f "$tmp_file"
 }
 
+write_management_wrapper() {
+  local wrapper_path="$1"
+  local tmp_file
+
+  tmp_file="$(mktemp)"
+  cat >"$tmp_file" <<EOF
+#!/usr/bin/env bash
+exec bash "${SCRIPT_BACKUP_PATH}" "\$@"
+EOF
+  install -m 755 "$tmp_file" "$wrapper_path"
+  rm -f "$tmp_file"
+}
+
 install_shortcuts() {
   ensure_dirs
-  copy_running_script_to "$SCRIPT_INSTALL_PATH" || true
-  copy_running_script_to "$SCRIPT_BACKUP_PATH" || true
+  copy_running_script_to "$SCRIPT_BACKUP_PATH" || return 1
+  write_management_wrapper "$SCRIPT_INSTALL_PATH"
+  if [ -d /usr/bin ]; then
+    ln -sf "$SCRIPT_INSTALL_PATH" "$SCRIPT_USR_PATH"
+  fi
   ln -sf "$XRAY_BIN" "$XRAY_BIN_LINK"
+}
+
+remove_management_shortcuts() {
+  rm -f "$SCRIPT_INSTALL_PATH" "$SCRIPT_USR_PATH"
 }
 
 backup_current_files() {
@@ -387,13 +412,13 @@ prompt_port() {
     entered_port="${REPLY:-$default_port}"
 
     if ! port_is_valid "$entered_port"; then
-      log_warn "Please enter a valid port between 1 and 65535."
+      log_warn "请输入 1 到 65535 之间的有效端口。"
       continue
     fi
 
     if port_is_listening "$entered_port"; then
-      log_warn "Port ${entered_port} is already in use. Reusing it may fail if another service owns it."
-      tty_printf 'Continue with port %s? [y/N]: ' "$entered_port"
+      log_warn "端口 ${entered_port} 已被占用，继续使用可能会与其他服务冲突。"
+      tty_printf '仍然使用端口 %s 吗？[y/N]: ' "$entered_port"
       read_tty_line
       reuse_answer="${REPLY:-}"
       case "${reuse_answer:-n}" in
@@ -435,17 +460,17 @@ prompt_sni_domain() {
   suggested="$(get_random_sni)"
 
   while true; do
-    tty_printf 'Reality SNI domain (press Enter for random: %s): ' "$suggested"
+    tty_printf 'Reality SNI 域名（直接回车使用随机值：%s）：' "$suggested"
     read_tty_line
     entered_domain="${REPLY:-$suggested}"
 
     if ! validate_domain_format "$entered_domain"; then
-      log_warn "Invalid domain format."
+      log_warn "域名格式不正确，请重新输入。"
       continue
     fi
 
     if ! validate_domain_resolution "$entered_domain"; then
-      tty_printf 'The domain does not appear to resolve on this server. Continue anyway? [y/N]: '
+      tty_printf '当前服务器无法解析该域名，是否仍然继续？[y/N]: '
       read_tty_line
       resolve_answer="${REPLY:-}"
       case "${resolve_answer:-n}" in
@@ -545,16 +570,16 @@ generate_x25519_keys() {
   fi
 
   if [ -n "${XRAY_X25519_ERROR_OUTPUT:-}" ]; then
-    log_warn "xray x25519 failed, falling back to OpenSSL. Raw output: ${XRAY_X25519_ERROR_OUTPUT}"
+    log_warn "xray x25519 生成密钥失败，已自动回退到 OpenSSL。原始输出：${XRAY_X25519_ERROR_OUTPUT}"
   else
-    log_warn "xray x25519 failed, falling back to OpenSSL."
+    log_warn "xray x25519 生成密钥失败，已自动回退到 OpenSSL。"
   fi
 
   if generate_x25519_keys_with_openssl; then
     return 0
   fi
 
-  log_error "Failed to generate REALITY keys."
+  log_error "生成 REALITY 密钥失败。"
   return 1
 }
 
@@ -562,7 +587,7 @@ generate_uuid() {
   local uuid
   uuid="$("$XRAY_BIN" uuid 2>/dev/null | tr -d '\r\n')"
   if [ -z "$uuid" ]; then
-    log_error "Failed to generate UUID."
+    log_error "生成 UUID 失败。"
     return 1
   fi
   REALITY_UUID="$uuid"
@@ -715,7 +740,7 @@ validate_config() {
     return 0
   fi
 
-  log_error "Xray configuration validation failed."
+  log_error "Xray 配置校验失败。"
   return 1
 }
 
@@ -753,12 +778,12 @@ restart_xray_service() {
   fi
 
   if systemctl is-active --quiet xray; then
-    log_info "Xray service is running."
+    log_info "Xray 服务运行正常。"
     return 0
   fi
 
   systemctl status xray --no-pager || true
-  log_error "Xray service failed to start."
+  log_error "Xray 服务启动失败。"
   return 1
 }
 
@@ -790,30 +815,30 @@ show_bbr_fq_status() {
   available_cc="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || printf 'unknown')"
 
   if [ "$current_cc" = "bbr" ]; then
-    bbr_status="enabled"
+    bbr_status="已启用"
   else
-    bbr_status="disabled"
+    bbr_status="未启用"
   fi
 
   if [ "$current_qdisc" = "fq" ]; then
-    fq_status="enabled"
+    fq_status="已启用"
   else
-    fq_status="disabled"
+    fq_status="未启用"
   fi
 
   if lsmod 2>/dev/null | awk '/^tcp_bbr/ {found=1} END {exit !found}'; then
-    bbr_module_status="yes"
+    bbr_module_status="可见"
   else
-    bbr_module_status="no or built-in"
+    bbr_module_status="未显示或已内置"
   fi
 
   cat <<EOF
-Kernel: $(uname -r)
-Current congestion control: ${current_cc} (${bbr_status})
-Current qdisc: ${current_qdisc} (${fq_status})
-Available congestion control: ${available_cc}
-tcp_bbr module visible: ${bbr_module_status}
-Config file: ${BBR_SYSCTL_FILE}
+内核版本：$(uname -r)
+当前拥塞控制：${current_cc} (${bbr_status})
+当前队列调度：${current_qdisc} (${fq_status})
+可用拥塞控制：${available_cc}
+tcp_bbr 模块状态：${bbr_module_status}
+配置文件：${BBR_SYSCTL_FILE}
 EOF
 }
 
@@ -877,7 +902,7 @@ generate_node_info() {
   local host service_state xray_version
 
   if ! load_state; then
-    log_error "No installation state was found."
+    log_error "未找到安装状态文件。"
     return 1
   fi
 
@@ -888,36 +913,36 @@ generate_node_info() {
   xray_version="${xray_version:-unknown}"
 
   {
-    echo "Xray Manager"
-    echo "Script version: ${SCRIPT_VERSION}"
-    echo "Xray version: ${xray_version}"
-    echo "Service status: ${service_state}"
-    echo "Server IP: ${host}"
+    echo "Xray 管理脚本"
+    echo "脚本版本：${SCRIPT_VERSION}"
+    echo "Xray 版本：${xray_version}"
+    echo "服务状态：${service_state}"
+    echo "服务器 IP：${host}"
     echo
 
     if [ "${INSTALL_VLESS:-no}" = "yes" ]; then
       echo "[VLESS + REALITY]"
-      echo "Address: ${host}"
-      echo "Port: ${REALITY_PORT}"
+      echo "地址：${host}"
+      echo "端口：${REALITY_PORT}"
       echo "UUID: ${REALITY_UUID}"
-      echo "Flow: xtls-rprx-vision"
-      echo "Security: reality"
+      echo "Flow：xtls-rprx-vision"
+      echo "安全类型：reality"
       echo "SNI: ${REALITY_SNI}"
-      echo "Public Key: ${REALITY_PUBLIC_KEY}"
-      echo "Short ID: ${REALITY_SHORT_ID}"
-      echo "Fingerprint: chrome"
-      echo "Share Link:"
+      echo "公钥：${REALITY_PUBLIC_KEY}"
+      echo "Short ID：${REALITY_SHORT_ID}"
+      echo "指纹：chrome"
+      echo "分享链接："
       build_vless_link "$host"
       echo
     fi
 
     if [ "${INSTALL_SS:-no}" = "yes" ]; then
       echo "[Shadowsocks]"
-      echo "Address: ${host}"
-      echo "Port: ${SS_PORT}"
-      echo "Method: ${SS_METHOD}"
-      echo "Password: ${SS_PASSWORD}"
-      echo "Share Link:"
+      echo "地址：${host}"
+      echo "端口：${SS_PORT}"
+      echo "加密方式：${SS_METHOD}"
+      echo "密码：${SS_PASSWORD}"
+      echo "分享链接："
       build_ss_link "$host"
       echo
     fi
@@ -931,12 +956,12 @@ choose_install_mode() {
 
   while true; do
     cat <<'EOF'
-Select install mode:
-  1) VLESS + REALITY
-  2) Shadowsocks
-  3) Both
+请选择安装协议：
+  1) 仅安装 VLESS + REALITY
+  2) 仅安装 Shadowsocks
+  3) 同时安装两者
 EOF
-    printf 'Choice [3]: '
+    printf '请输入选项 [3]: '
     read -r choice
     choice="${choice:-3}"
 
@@ -960,29 +985,31 @@ EOF
         return 0
         ;;
       *)
-        log_warn "Invalid choice."
+        log_warn "输入无效，请重新选择。"
         ;;
     esac
   done
 }
 
 install_flow() {
-  local latest_version installed_version
+  local latest_version installed_version skip_existing_prompt
 
   require_root
   ensure_systemd
   install_dependencies
   ensure_dirs
 
-  if [ -f "$STATE_FILE" ]; then
-    printf 'An existing xray-manager installation was found. Backup and overwrite it? [y/N]: '
+  skip_existing_prompt="${1:-}"
+
+  if [ "$skip_existing_prompt" != "skip-existing-check" ] && [ -f "$STATE_FILE" ]; then
+    printf '检测到已有安装记录，是否备份后覆盖安装？[y/N]: '
     read -r overwrite_answer
     case "${overwrite_answer:-n}" in
       y|Y|yes|YES)
         backup_current_files
         ;;
       *)
-        log_info "Installation cancelled."
+        log_info "已取消安装。"
         return 0
         ;;
     esac
@@ -1001,22 +1028,22 @@ install_flow() {
   SS_PASSWORD=""
 
   if [ "$INSTALL_VLESS" = "yes" ]; then
-    REALITY_PORT="$(prompt_port 'Reality listen port' "$DEFAULT_REALITY_PORT")"
+    REALITY_PORT="$(prompt_port 'Reality 监听端口' "$DEFAULT_REALITY_PORT")"
     REALITY_SNI="$(prompt_sni_domain)"
   fi
 
   if [ "$INSTALL_SS" = "yes" ]; then
-    SS_PORT="$(prompt_port 'Shadowsocks listen port' "$DEFAULT_SS_PORT")"
+    SS_PORT="$(prompt_port 'Shadowsocks 监听端口' "$DEFAULT_SS_PORT")"
   fi
 
   if [ "$INSTALL_VLESS" = "yes" ] && [ "$INSTALL_SS" = "yes" ] && [ "$REALITY_PORT" = "$SS_PORT" ]; then
-    log_error "Reality and Shadowsocks cannot listen on the same port."
+    log_error "Reality 与 Shadowsocks 不能使用同一个监听端口。"
     return 1
   fi
 
   latest_version="$(get_latest_release_tag || true)"
   if [ -z "$latest_version" ]; then
-    log_error "Failed to detect the latest Xray version."
+    log_error "获取最新 Xray 版本失败。"
     return 1
   fi
 
@@ -1046,9 +1073,12 @@ install_flow() {
 
   write_service_file
   apply_bbr_fq
-  install_shortcuts
+  if ! install_shortcuts; then
+    log_error "安装快捷管理命令失败。"
+    return 1
+  fi
   if ! write_state_file; then
-    log_error "Failed to write state file."
+    log_error "写入状态文件失败。"
     return 1
   fi
 
@@ -1056,7 +1086,9 @@ install_flow() {
     return 1
   fi
 
-  log_info "Installation completed."
+  log_info "安装完成。"
+  log_info "管理快捷命令：xray"
+  log_info "若当前会话仍提示找不到 xray，请重新登录终端后再试。"
   echo
   show_bbr_fq_status
   echo
@@ -1068,7 +1100,7 @@ restart_flow() {
   ensure_systemd
 
   if [ ! -f "$SERVICE_FILE" ]; then
-    log_error "Xray service file was not found."
+    log_error "未找到 Xray 服务文件。"
     return 1
   fi
 
@@ -1083,7 +1115,7 @@ update_xray_flow() {
   install_dependencies
 
   if [ ! -x "$XRAY_BIN" ]; then
-    log_error "Xray is not installed."
+    log_error "当前未安装 Xray。"
     return 1
   fi
 
@@ -1091,12 +1123,12 @@ update_xray_flow() {
   latest_version="$(get_latest_release_tag || true)"
 
   if [ -z "$latest_version" ]; then
-    log_error "Failed to detect the latest Xray version."
+    log_error "获取最新 Xray 版本失败。"
     return 1
   fi
 
   if [ "$current_version" = "$latest_version" ]; then
-    log_info "Xray is already up to date (${current_version})."
+    log_info "当前 Xray 已是最新版本（${current_version}）。"
     return 0
   fi
 
@@ -1115,19 +1147,19 @@ update_xray_flow() {
   fi
 
   restart_xray_service
-  log_info "Xray updated from ${current_version:-unknown} to ${latest_version}."
+  log_info "Xray 已从 ${current_version:-unknown} 更新到 ${latest_version}。"
 }
 
 change_sni_flow() {
   require_root
 
   if ! load_state; then
-    log_error "No installation state was found."
+    log_error "未找到安装状态文件。"
     return 1
   fi
 
   if [ "${INSTALL_VLESS:-no}" != "yes" ]; then
-    log_error "VLESS + REALITY is not installed."
+    log_error "当前未安装 VLESS + REALITY。"
     return 1
   fi
 
@@ -1148,20 +1180,8 @@ check_bbr_flow() {
   show_bbr_fq_status
 }
 
-uninstall_flow() {
-  require_root
-  ensure_systemd
-
-  printf 'This will remove Xray, config, service, shortcuts and BBR/FQ config written by this script. Continue? [y/N]: '
-  read -r remove_answer
-  case "${remove_answer:-n}" in
-    y|Y|yes|YES)
-      ;;
-    *)
-      log_info "Uninstall cancelled."
-      return 0
-      ;;
-  esac
+remove_xray_components() {
+  local keep_manager="${1:-no}"
 
   stop_xray_service
   rm -f "$SERVICE_FILE"
@@ -1172,10 +1192,60 @@ uninstall_flow() {
   rm -rf "$CONFIG_DIR"
   rm -f "$BBR_SYSCTL_FILE" "$BBR_MODULE_FILE"
   try_restore_network_defaults
-  rm -f "$SCRIPT_INSTALL_PATH"
-  rm -rf "$STATE_DIR"
 
-  log_info "Uninstall completed."
+  if [ "$keep_manager" = "yes" ]; then
+    rm -f "$STATE_FILE" "$NODE_INFO_FILE"
+    mkdir -p "${STATE_DIR}/backups"
+  else
+    remove_management_shortcuts
+    rm -rf "$STATE_DIR"
+  fi
+}
+
+reinstall_flow() {
+  require_root
+  ensure_systemd
+
+  if [ ! -f "$STATE_FILE" ] && [ ! -x "$XRAY_BIN" ] && [ ! -f "$CONFIG_FILE" ]; then
+    log_warn "当前未检测到已安装的 Xray 环境，将直接进入安装流程。"
+    install_flow
+    return $?
+  fi
+
+  printf '将重新安装 Xray、配置与节点信息，是否继续？[y/N]: '
+  read -r reinstall_answer
+  case "${reinstall_answer:-n}" in
+    y|Y|yes|YES)
+      ;;
+    *)
+      log_info "已取消重新安装。"
+      return 0
+      ;;
+  esac
+
+  backup_current_files
+  remove_xray_components "yes"
+  install_flow "skip-existing-check"
+}
+
+uninstall_flow() {
+  require_root
+  ensure_systemd
+
+  printf '将卸载 Xray、配置、服务、快捷命令以及脚本写入的 BBR/FQ 配置，是否继续？[y/N]: '
+  read -r remove_answer
+  case "${remove_answer:-n}" in
+    y|Y|yes|YES)
+      ;;
+    *)
+      log_info "已取消卸载。"
+      return 0
+      ;;
+  esac
+
+  remove_xray_components
+
+  log_info "卸载完成。"
 }
 
 update_script_flow() {
@@ -1190,7 +1260,7 @@ update_script_flow() {
     current_url="${DEFAULT_SCRIPT_UPDATE_URL:-}"
   fi
 
-  printf 'Raw script URL for update'
+  printf '请输入脚本更新地址'
   if [ -n "$current_url" ]; then
     printf ' [%s]' "$current_url"
   fi
@@ -1199,25 +1269,28 @@ update_script_flow() {
   input_url="${input_url:-$current_url}"
 
   if [ -z "$input_url" ]; then
-    log_error "No script update URL was provided."
+    log_error "未提供脚本更新地址。"
     return 1
   fi
 
   tmp_file="$(mktemp)"
   if ! curl -fL --retry 3 --connect-timeout 15 -o "$tmp_file" "$input_url"; then
     rm -f "$tmp_file"
-    log_error "Failed to download the script from ${input_url}."
+    log_error "从 ${input_url} 下载脚本失败。"
     return 1
   fi
 
   if ! grep -q 'SCRIPT_VERSION=' "$tmp_file"; then
     rm -f "$tmp_file"
-    log_error "Downloaded file does not look like a valid xray-manager script."
+    log_error "下载的文件不是有效的 xray 管理脚本。"
     return 1
   fi
 
-  install -m 755 "$tmp_file" "$SCRIPT_INSTALL_PATH"
   install -m 755 "$tmp_file" "$SCRIPT_BACKUP_PATH"
+  write_management_wrapper "$SCRIPT_INSTALL_PATH"
+  if [ -d /usr/bin ]; then
+    ln -sf "$SCRIPT_INSTALL_PATH" "$SCRIPT_USR_PATH"
+  fi
   rm -f "$tmp_file"
 
   if load_state; then
@@ -1225,7 +1298,7 @@ update_script_flow() {
     write_state_file
   fi
 
-  log_info "Script updated successfully. Run 'xray' again to use the new version."
+  log_info "脚本更新完成。请重新执行 xray 命令使用新版本。"
 }
 
 show_info_flow() {
@@ -1234,17 +1307,18 @@ show_info_flow() {
 
 print_help() {
   cat <<EOF
-Usage:
-  $(basename "$0")                Open interactive menu
-  $(basename "$0") install        Install Xray and proxy protocols
-  $(basename "$0") uninstall      Remove Xray and generated files
-  $(basename "$0") update         Update Xray core
-  $(basename "$0") restart        Restart Xray service
-  $(basename "$0") info           Show node information
-  $(basename "$0") change-sni     Change Reality SNI domain
-  $(basename "$0") check-bbr      Check BBR + FQ status
-  $(basename "$0") update-script  Update this management script
-  $(basename "$0") help           Show this help
+用法：
+  $(basename "$0")                打开交互式菜单
+  $(basename "$0") install        安装 Xray 与代理协议
+  $(basename "$0") reinstall      重新安装 Xray 与代理协议
+  $(basename "$0") uninstall      卸载 Xray 与脚本生成的文件
+  $(basename "$0") update         更新 Xray 内核
+  $(basename "$0") restart        重启 Xray 服务
+  $(basename "$0") info           查看节点信息
+  $(basename "$0") change-sni     更换 Reality SNI 域名
+  $(basename "$0") check-bbr      检查 BBR + FQ 状态
+  $(basename "$0") update-script  更新管理脚本
+  $(basename "$0") help           显示帮助信息
 EOF
 }
 
@@ -1253,20 +1327,21 @@ main_menu() {
     clear 2>/dev/null || true
     cat <<EOF
 ========================================
- Xray Manager ${SCRIPT_VERSION}
+ Xray 管理脚本 ${SCRIPT_VERSION}
 ========================================
- 1) Install
- 2) Uninstall
- 3) Update Xray core
- 4) Restart Xray
- 5) Show node info
- 6) Change Reality SNI
- 7) Check BBR + FQ status
- 8) Update script
- 0) Exit
+ 1) 安装
+ 2) 重新安装
+ 3) 卸载
+ 4) 更新 Xray 内核
+ 5) 重启 Xray
+ 6) 查看节点信息
+ 7) 更换 Reality SNI
+ 8) 检查 BBR + FQ 状态
+  9) 更新脚本
+  0) 退出
 ========================================
 EOF
-    printf 'Select an option: '
+    printf '请选择功能：'
 
     local choice
     read -r choice
@@ -1277,31 +1352,34 @@ EOF
         install_flow
         ;;
       2)
-        uninstall_flow
+        reinstall_flow
         ;;
       3)
-        update_xray_flow
+        uninstall_flow
         ;;
       4)
-        restart_flow
+        update_xray_flow
         ;;
       5)
-        show_info_flow
+        restart_flow
         ;;
       6)
-        change_sni_flow
+        show_info_flow
         ;;
       7)
-        check_bbr_flow
+        change_sni_flow
         ;;
       8)
+        check_bbr_flow
+        ;;
+      9)
         update_script_flow
         ;;
       0)
         exit 0
         ;;
       *)
-        log_warn "Invalid option."
+        log_warn "菜单选项无效，请重新输入。"
         ;;
     esac
 
@@ -1314,6 +1392,9 @@ main() {
   case "${1:-menu}" in
     install)
       install_flow
+      ;;
+    reinstall)
+      reinstall_flow
       ;;
     uninstall|remove)
       uninstall_flow
@@ -1343,7 +1424,7 @@ main() {
       main_menu
       ;;
     *)
-      log_error "Unknown command: $1"
+      log_error "未知命令：$1"
       print_help
       exit 1
       ;;
